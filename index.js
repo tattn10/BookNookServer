@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId } from 'mongodb';
 
 const app = express();
 const port = Number(process.env.PORT ?? 8000);
@@ -40,8 +40,22 @@ app.get('/books', async (_request, response) => {
   }
 });
 
-app.get('/books/:id', (_request, response) => {
-  response.status(501).json({ error: 'GET /books/:id is not implemented yet.' });
+app.get('/books/:id', async (request, response) => {
+  if (!ObjectId.isValid(request.params.id)) {
+    return response.status(400).json({ error: 'Invalid book ID.' });
+  }
+
+  try {
+    const book = await books.findOne({ _id: new ObjectId(request.params.id) });
+    if (!book) {
+      return response.status(404).json({ error: 'Book not found.' });
+    }
+
+    return response.json(book);
+  } catch (error) {
+    console.error('Could not fetch book from MongoDB:', error);
+    return response.status(500).json({ error: 'Could not fetch book. Please try again.' });
+  }
 });
 
 app.post('/books', async (request, response) => {
