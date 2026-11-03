@@ -30,4 +30,8 @@ apiRouter.get('/borrows', (_request, response) => {
   response.status(501).json({ error: 'GET /borrows is not implemented yet.' });
 });
 
+apiRouter.delete('/borrows/:id', (_request, response) => {
+  response.status(501).json({ error: 'DELETE /borrows/:id is not implemented yet.' });
+});
+
 export default apiRouter;
