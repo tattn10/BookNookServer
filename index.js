@@ -39,9 +39,14 @@ if (!borrowsCollectionExists) {
 const borrows = db.collection('borrows');
 const bookCategories = new Set(['Fiction', 'Science', 'History', 'Kids', 'Others']);
 
-app.get('/books', async (_request, response) => {
+app.get('/books', async (request, response) => {
+  const userEmail = typeof request.query.userEmail === 'string'
+    ? request.query.userEmail.trim().toLowerCase()
+    : '';
+
   try {
-    const allBooks = await books.find().sort({ addedAt: -1 }).toArray();
+    const filter = userEmail ? { userEmail } : {};
+    const allBooks = await books.find(filter).sort({ addedAt: -1 }).toArray();
     return response.json(allBooks);
   } catch (error) {
     console.error('Could not fetch books from MongoDB:', error);
@@ -118,21 +123,110 @@ app.post('/books', async (request, response) => {
   }
 });
 
-app.patch('/books/:id', (_request, response) => {
-  response.status(501).json({ error: 'PATCH /books/:id is not implemented yet.' });
+app.patch('/books/:id', async (request, response) => {
+  const userEmail = request.body.userEmail?.trim().toLowerCase();
+  const title = request.body.bookTitle?.trim();
+  const author = request.body.authorName?.trim();
+  const category = request.body.category?.trim();
+  const imageUrl = request.body.imageUrl?.trim();
+  const description = request.body.description?.trim();
+
+  if (!ObjectId.isValid(request.params.id)) {
+    return response.status(400).json({ error: 'Invalid book ID.' });
+  }
+
+  if (!userEmail || !title || !author || !category || !imageUrl || !description) {
+    return response.status(400).json({ error: 'Complete all book fields before saving.' });
+  }
+
+  if (!bookCategories.has(category)) {
+    return response.status(400).json({ error: 'Choose a valid book category.' });
+  }
+
+  let parsedImageUrl;
+  try {
+    parsedImageUrl = new URL(imageUrl);
+  } catch {
+    return response.status(400).json({ error: 'Enter a valid book image URL.' });
+  }
+
+  if (!['http:', 'https:'].includes(parsedImageUrl.protocol)) {
+    return response.status(400).json({ error: 'Book image URLs must use HTTP or HTTPS.' });
+  }
+
+  try {
+    const result = await books.updateOne(
+      { _id: new ObjectId(request.params.id), userEmail },
+      {
+        $set: {
+          title,
+          author,
+          category,
+          imageUrl,
+          description,
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    if (!result.matchedCount) {
+      return response.status(404).json({ error: 'Book not found in your books.' });
+    }
+
+    const book = await books.findOne({ _id: new ObjectId(request.params.id) });
+    return response.json({ message: 'Book updated successfully.', book });
+  } catch (error) {
+    console.error('Could not update book in MongoDB:', error);
+    return response.status(500).json({ error: 'Could not update book. Please try again.' });
+  }
 });
 
-app.delete('/books/:id', (_request, response) => {
-  response.status(501).json({ error: 'DELETE /books/:id is not implemented yet.' });
+app.delete('/books/:id', async (request, response) => {
+  const userEmail = typeof request.query.userEmail === 'string'
+    ? request.query.userEmail.trim().toLowerCase()
+    : '';
+
+  if (!ObjectId.isValid(request.params.id) || !userEmail) {
+    return response.status(400).json({ error: 'A valid book ID and user email are required.' });
+  }
+
+  try {
+    const result = await books.deleteOne({
+      _id: new ObjectId(request.params.id),
+      userEmail,
+    });
+
+    if (!result.deletedCount) {
+      return response.status(404).json({ error: 'Book not found in your books.' });
+    }
+
+    return response.json({ message: 'Book deleted successfully.' });
+  } catch (error) {
+    console.error('Could not delete book from MongoDB:', error);
+    return response.status(500).json({ error: 'Could not delete book. Please try again.' });
+  }
 });
 
 app.post('/borrows', async (request, response) => {
   const { bookId } = request.body;
-  const userName = request.body.userName?.trim();
   const userEmail = request.body.userEmail?.trim().toLowerCase();
+  const requestedReturnDate = request.body.returnDate;
 
-  if (!ObjectId.isValid(bookId) || !userName || !userEmail) {
-    return response.status(400).json({ error: 'A valid book and logged-in user are required.' });
+  if (!ObjectId.isValid(bookId) || !userEmail || typeof requestedReturnDate !== 'string') {
+    return response.status(400).json({ error: 'A valid book, user email, and return date are required.' });
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(requestedReturnDate)) {
+    return response.status(400).json({ error: 'Choose a valid return date.' });
+  }
+
+  const returnDate = new Date(`${requestedReturnDate}T23:59:59.999Z`);
+  if (
+    Number.isNaN(returnDate.getTime()) ||
+    returnDate.toISOString().slice(0, 10) !== requestedReturnDate ||
+    returnDate <= new Date()
+  ) {
+    return response.status(400).json({ error: 'The return date must be in the future.' });
   }
 
   try {
@@ -152,9 +246,10 @@ app.post('/borrows', async (request, response) => {
     const borrow = {
       bookId: new ObjectId(bookId),
       bookTitle: book.title,
-      userName,
+      bookImage: book.imageUrl,
       userEmail,
-      borrowedAt: new Date(),
+      borrowDate: new Date(),
+      returnDate,
     };
     const result = await borrows.insertOne(borrow);
 
@@ -168,12 +263,51 @@ app.post('/borrows', async (request, response) => {
   }
 });
 
-app.get('/borrows', (_request, response) => {
-  response.status(501).json({ error: 'GET /borrows is not implemented yet.' });
+app.get('/borrows', async (request, response) => {
+  const userEmail = typeof request.query.userEmail === 'string'
+    ? request.query.userEmail.trim().toLowerCase()
+    : '';
+
+  if (!userEmail) {
+    return response.status(400).json({ error: 'A user email is required.' });
+  }
+
+  try {
+    const userBorrows = await borrows
+      .find({ userEmail })
+      .sort({ borrowDate: -1 })
+      .toArray();
+    return response.json(userBorrows);
+  } catch (error) {
+    console.error('Could not fetch borrows from MongoDB:', error);
+    return response.status(500).json({ error: 'Could not fetch borrows. Please try again.' });
+  }
 });
 
-app.delete('/borrows/:id', (_request, response) => {
-  response.status(501).json({ error: 'DELETE /borrows/:id is not implemented yet.' });
+app.delete('/borrows/:id', async (request, response) => {
+  const userEmail = typeof request.query.userEmail === 'string'
+    ? request.query.userEmail.trim().toLowerCase()
+    : '';
+
+  if (!ObjectId.isValid(request.params.id) || !userEmail) {
+    return response.status(400).json({ error: 'A valid borrow ID and user email are required.' });
+  }
+
+  try {
+    const result = await borrows.deleteOne({
+      _id: new ObjectId(request.params.id),
+      userEmail,
+    });
+
+    if (!result.deletedCount) {
+      return response.status(404).json({ error: 'Borrow record not found.' });
+    }
+
+    return response.json({ message: 'Book returned successfully.' });
+  } catch (error) {
+    console.error('Could not return book in MongoDB:', error);
+    return response.status(500).json({ error: 'Could not return book. Please try again.' });
+  }
 });
 
 
@@ -181,9 +315,6 @@ app.get('/', (_request, response) => {
   response.json({ message: 'BookNook API server is running' });
 });
 
-app.get('/health', (_request, response) => {
-  response.json({ status: 'ok' });
-});
 
 app.use((error, _request, response, _next) => {
   console.error('Request failed:', error);
