@@ -6,12 +6,17 @@ import { MongoClient, ObjectId } from 'mongodb';
 const app = express();
 const port = Number(process.env.PORT ?? 8000);
 const mongoUri = process.env.MDB_URL;
+const frontendUrls = (process.env.FRONTEND_URL || 'http://localhost:3000')
+  .split(',')
+  .map((url) => url.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+const authServerUrl = frontendUrls[0];
 
 if (!mongoUri) {
   throw new Error('MDB_URL must be set in Server/.env.');
 }
 
-app.use(cors());
+app.use(cors({ origin: frontendUrls, credentials: true }));
 app.use(express.json());
 
 const client = new MongoClient(mongoUri);
@@ -39,13 +44,59 @@ if (!borrowsCollectionExists) {
 const borrows = db.collection('borrows');
 const bookCategories = new Set(['Fiction', 'Science', 'History', 'Kids', 'Others']);
 
-app.get('/books', async (request, response) => {
-  const userEmail = typeof request.query.userEmail === 'string'
-    ? request.query.userEmail.trim().toLowerCase()
-    : '';
+async function requireAuth(request, response, next) {
+  const cookie = request.get('cookie');
+  if (!cookie) {
+    return response.status(401).json({ error: 'Please log in to continue.' });
+  }
 
   try {
-    const filter = userEmail ? { userEmail } : {};
+    const authResponse = await fetch(`${authServerUrl}/api/auth/get-session`, {
+      headers: { cookie },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(5_000),
+    });
+
+    if (!authResponse.ok) {
+      if (authResponse.status >= 500) {
+        console.error(`Better Auth session check failed with status ${authResponse.status}.`);
+        return response.status(503).json({ error: 'Could not verify your login. Please try again.' });
+      }
+
+      return response.status(401).json({ error: 'Please log in to continue.' });
+    }
+
+    const session = await authResponse.json();
+    const email = session?.user?.email;
+    if (typeof email !== 'string' || !email.trim()) {
+      return response.status(401).json({ error: 'Please log in to continue.' });
+    }
+
+    request.authUser = {
+      email: email.trim().toLowerCase(),
+      name: typeof session.user.name === 'string' ? session.user.name : '',
+    };
+    return next();
+  } catch (error) {
+    console.error('Could not verify Better Auth session:', error);
+    return response.status(503).json({ error: 'Could not verify your login. Please try again.' });
+  }
+}
+
+function requireAuthForUserBooks(request, response, next) {
+  if (!request.query.userEmail) {
+    return next();
+  }
+
+  return requireAuth(request, response, next);
+}
+
+app.get('/books', requireAuthForUserBooks, async (request, response) => {
+  const filter = request.query.userEmail
+    ? { userEmail: request.authUser.email }
+    : {};
+
+  try {
     const allBooks = await books.find(filter).sort({ addedAt: -1 }).toArray();
     return response.json(allBooks);
   } catch (error) {
@@ -54,7 +105,7 @@ app.get('/books', async (request, response) => {
   }
 });
 
-app.get('/books/:id', async (request, response) => {
+app.get('/books/:id', requireAuth, async (request, response) => {
   if (!ObjectId.isValid(request.params.id)) {
     return response.status(400).json({ error: 'Invalid book ID.' });
   }
@@ -72,17 +123,17 @@ app.get('/books/:id', async (request, response) => {
   }
 });
 
-app.post('/books', async (request, response) => {
+app.post('/books', requireAuth, async (request, response) => {
   const title = request.body.bookTitle?.trim();
   const author = request.body.authorName?.trim();
   const category = request.body.category?.trim();
   const imageUrl = request.body.imageUrl?.trim();
   const description = request.body.description?.trim();
-  const userName = request.body.userName?.trim();
-  const userEmail = request.body.userEmail?.trim().toLowerCase();
+  const userName = request.authUser.name || request.authUser.email;
+  const userEmail = request.authUser.email;
 
-  if (!title || !author || !category || !imageUrl || !description || !userName || !userEmail) {
-    return response.status(400).json({ error: 'Complete all book, image URL, and user fields.' });
+  if (!title || !author || !category || !imageUrl || !description) {
+    return response.status(400).json({ error: 'Complete all book and image URL fields.' });
   }
 
   if (!bookCategories.has(category)) {
@@ -123,8 +174,8 @@ app.post('/books', async (request, response) => {
   }
 });
 
-app.patch('/books/:id', async (request, response) => {
-  const userEmail = request.body.userEmail?.trim().toLowerCase();
+app.patch('/books/:id', requireAuth, async (request, response) => {
+  const userEmail = request.authUser.email;
   const title = request.body.bookTitle?.trim();
   const author = request.body.authorName?.trim();
   const category = request.body.category?.trim();
@@ -135,7 +186,7 @@ app.patch('/books/:id', async (request, response) => {
     return response.status(400).json({ error: 'Invalid book ID.' });
   }
 
-  if (!userEmail || !title || !author || !category || !imageUrl || !description) {
+  if (!title || !author || !category || !imageUrl || !description) {
     return response.status(400).json({ error: 'Complete all book fields before saving.' });
   }
 
@@ -181,13 +232,11 @@ app.patch('/books/:id', async (request, response) => {
   }
 });
 
-app.delete('/books/:id', async (request, response) => {
-  const userEmail = typeof request.query.userEmail === 'string'
-    ? request.query.userEmail.trim().toLowerCase()
-    : '';
+app.delete('/books/:id', requireAuth, async (request, response) => {
+  const userEmail = request.authUser.email;
 
-  if (!ObjectId.isValid(request.params.id) || !userEmail) {
-    return response.status(400).json({ error: 'A valid book ID and user email are required.' });
+  if (!ObjectId.isValid(request.params.id)) {
+    return response.status(400).json({ error: 'A valid book ID is required.' });
   }
 
   try {
@@ -207,13 +256,13 @@ app.delete('/books/:id', async (request, response) => {
   }
 });
 
-app.post('/borrows', async (request, response) => {
+app.post('/borrows', requireAuth, async (request, response) => {
   const { bookId } = request.body;
-  const userEmail = request.body.userEmail?.trim().toLowerCase();
+  const userEmail = request.authUser.email;
   const requestedReturnDate = request.body.returnDate;
 
-  if (!ObjectId.isValid(bookId) || !userEmail || typeof requestedReturnDate !== 'string') {
-    return response.status(400).json({ error: 'A valid book, user email, and return date are required.' });
+  if (!ObjectId.isValid(bookId) || typeof requestedReturnDate !== 'string') {
+    return response.status(400).json({ error: 'A valid book and return date are required.' });
   }
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(requestedReturnDate)) {
@@ -263,18 +312,10 @@ app.post('/borrows', async (request, response) => {
   }
 });
 
-app.get('/borrows', async (request, response) => {
-  const userEmail = typeof request.query.userEmail === 'string'
-    ? request.query.userEmail.trim().toLowerCase()
-    : '';
-
-  if (!userEmail) {
-    return response.status(400).json({ error: 'A user email is required.' });
-  }
-
+app.get('/borrows', requireAuth, async (request, response) => {
   try {
     const userBorrows = await borrows
-      .find({ userEmail })
+      .find({ userEmail: request.authUser.email })
       .sort({ borrowDate: -1 })
       .toArray();
     return response.json(userBorrows);
@@ -284,19 +325,15 @@ app.get('/borrows', async (request, response) => {
   }
 });
 
-app.delete('/borrows/:id', async (request, response) => {
-  const userEmail = typeof request.query.userEmail === 'string'
-    ? request.query.userEmail.trim().toLowerCase()
-    : '';
-
-  if (!ObjectId.isValid(request.params.id) || !userEmail) {
-    return response.status(400).json({ error: 'A valid borrow ID and user email are required.' });
+app.delete('/borrows/:id', requireAuth, async (request, response) => {
+  if (!ObjectId.isValid(request.params.id)) {
+    return response.status(400).json({ error: 'A valid borrow ID is required.' });
   }
 
   try {
     const result = await borrows.deleteOne({
       _id: new ObjectId(request.params.id),
-      userEmail,
+      userEmail: request.authUser.email,
     });
 
     if (!result.deletedCount) {
