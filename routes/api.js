@@ -26,4 +26,8 @@ apiRouter.post('/borrows', (_request, response) => {
   response.status(501).json({ error: 'POST /borrows is not implemented yet.' });
 });
 
+apiRouter.get('/borrows', (_request, response) => {
+  response.status(501).json({ error: 'GET /borrows is not implemented yet.' });
+});
+
 export default apiRouter;
