@@ -22,4 +22,8 @@ apiRouter.delete('/books/:id', (_request, response) => {
   response.status(501).json({ error: 'DELETE /books/:id is not implemented yet.' });
 });
 
+apiRouter.post('/borrows', (_request, response) => {
+  response.status(501).json({ error: 'POST /borrows is not implemented yet.' });
+});
+
 export default apiRouter;
