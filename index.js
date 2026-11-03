@@ -28,6 +28,15 @@ if (!booksCollectionExists) {
 }
 
 const books = db.collection('books');
+const borrowsCollectionExists = await db
+  .listCollections({ name: 'borrows' }, { nameOnly: true })
+  .hasNext();
+
+if (!borrowsCollectionExists) {
+  await db.createCollection('borrows');
+}
+
+const borrows = db.collection('borrows');
 const bookCategories = new Set(['Fiction', 'Science', 'History', 'Kids', 'Others']);
 
 app.get('/books', async (_request, response) => {
@@ -117,8 +126,46 @@ app.delete('/books/:id', (_request, response) => {
   response.status(501).json({ error: 'DELETE /books/:id is not implemented yet.' });
 });
 
-app.post('/borrows', (_request, response) => {
-  response.status(501).json({ error: 'POST /borrows is not implemented yet.' });
+app.post('/borrows', async (request, response) => {
+  const { bookId } = request.body;
+  const userName = request.body.userName?.trim();
+  const userEmail = request.body.userEmail?.trim().toLowerCase();
+
+  if (!ObjectId.isValid(bookId) || !userName || !userEmail) {
+    return response.status(400).json({ error: 'A valid book and logged-in user are required.' });
+  }
+
+  try {
+    const book = await books.findOne({ _id: new ObjectId(bookId) });
+    if (!book) {
+      return response.status(404).json({ error: 'Book not found.' });
+    }
+
+    const existingBorrow = await borrows.findOne({
+      bookId: new ObjectId(bookId),
+      userEmail,
+    });
+    if (existingBorrow) {
+      return response.status(409).json({ error: 'You have already borrowed this book.' });
+    }
+
+    const borrow = {
+      bookId: new ObjectId(bookId),
+      bookTitle: book.title,
+      userName,
+      userEmail,
+      borrowedAt: new Date(),
+    };
+    const result = await borrows.insertOne(borrow);
+
+    return response.status(201).json({
+      message: 'Book borrowed successfully.',
+      borrow: { ...borrow, _id: result.insertedId },
+    });
+  } catch (error) {
+    console.error('Could not save borrow to MongoDB:', error);
+    return response.status(500).json({ error: 'Could not borrow this book. Please try again.' });
+  }
 });
 
 app.get('/borrows', (_request, response) => {
