@@ -2,6 +2,7 @@ import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
 import { MongoClient, ObjectId } from 'mongodb';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 
 const app = express();
 const port = Number(process.env.PORT ?? 8000);
@@ -11,6 +12,7 @@ const frontendUrls = (process.env.FRONTEND_URL || 'http://localhost:3000')
   .map((url) => url.trim().replace(/\/+$/, ''))
   .filter(Boolean);
 const authServerUrl = frontendUrls[0];
+const authJwks = createRemoteJWKSet(new URL('/api/auth/jwks', authServerUrl));
 
 if (!mongoUri) {
   throw new Error('MDB_URL must be set in Server/.env.');
@@ -83,6 +85,35 @@ async function requireAuth(request, response, next) {
   }
 }
 
+async function requireJwt(request, response, next) {
+  const authorization = request.get('authorization') || '';
+  const [scheme, token] = authorization.split(' ', 2);
+
+  if (scheme !== 'Bearer' || !token) {
+    return response.status(401).json({ error: 'Please log in to continue.' });
+  }
+
+  try {
+    const { payload } = await jwtVerify(token, authJwks, {
+      issuer: authServerUrl,
+      audience: authServerUrl,
+    });
+    const email = payload.email;
+
+    if (typeof email !== 'string' || !email.trim()) {
+      return response.status(401).json({ error: 'Please log in to continue.' });
+    }
+
+    request.authUser = {
+      email: email.trim().toLowerCase(),
+      name: typeof payload.name === 'string' ? payload.name : '',
+    };
+    return next();
+  } catch {
+    return response.status(401).json({ error: 'Please log in to continue.' });
+  }
+}
+
 function requireAuthForUserBooks(request, response, next) {
   if (!request.query.userEmail) {
     return next();
@@ -123,7 +154,7 @@ app.get('/books/:id', requireAuth, async (request, response) => {
   }
 });
 
-app.post('/books', requireAuth, async (request, response) => {
+app.post('/books', requireJwt, async (request, response) => {
   const title = request.body.bookTitle?.trim();
   const author = request.body.authorName?.trim();
   const category = request.body.category?.trim();
@@ -174,7 +205,7 @@ app.post('/books', requireAuth, async (request, response) => {
   }
 });
 
-app.patch('/books/:id', requireAuth, async (request, response) => {
+app.patch('/books/:id', requireJwt, async (request, response) => {
   const userEmail = request.authUser.email;
   const title = request.body.bookTitle?.trim();
   const author = request.body.authorName?.trim();
@@ -232,7 +263,7 @@ app.patch('/books/:id', requireAuth, async (request, response) => {
   }
 });
 
-app.delete('/books/:id', requireAuth, async (request, response) => {
+app.delete('/books/:id', requireJwt, async (request, response) => {
   const userEmail = request.authUser.email;
 
   if (!ObjectId.isValid(request.params.id)) {
@@ -256,7 +287,7 @@ app.delete('/books/:id', requireAuth, async (request, response) => {
   }
 });
 
-app.post('/borrows', requireAuth, async (request, response) => {
+app.post('/borrows', requireJwt, async (request, response) => {
   const { bookId } = request.body;
   const userEmail = request.authUser.email;
   const requestedReturnDate = request.body.returnDate;
@@ -325,7 +356,7 @@ app.get('/borrows', requireAuth, async (request, response) => {
   }
 });
 
-app.delete('/borrows/:id', requireAuth, async (request, response) => {
+app.delete('/borrows/:id', requireJwt, async (request, response) => {
   if (!ObjectId.isValid(request.params.id)) {
     return response.status(400).json({ error: 'A valid borrow ID is required.' });
   }
